@@ -3,13 +3,34 @@
 import gzip
 import json
 import os
+import platform
 import subprocess
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from . import db, paths
+
+
+def _path_to_file_uri(path: str) -> str:
+    """Convert a filesystem path to a ``file://`` URI in Cursor's native format.
+
+    Examples (on the respective host OS):
+      /home/alice/repo               -> file:///home/alice/repo
+      /Users/alice/repo              -> file:///Users/alice/repo
+      D:\\projects\\repo             -> file:///d%3A/projects/repo
+    """
+    normalized = os.path.normpath(path)
+    if platform.system() == "Windows":
+        # Cursor stores Windows paths as forward-slashed, %3A-encoded drives.
+        drive, rest = os.path.splitdrive(normalized)
+        rest = rest.replace("\\", "/")
+        if drive:
+            return "file:///" + quote(drive.lower(), safe="") + rest
+        return "file://" + quote(rest, safe="/")
+    return "file://" + quote(normalized, safe="/")
 
 
 def _get_shard_paths(base_path: Path) -> list[Path]:
@@ -108,7 +129,24 @@ def is_cursor_running() -> bool:
     characters. Instead we parse `ps -axo args` and look for the main
     Cursor executable while excluding helpers, crash handlers, and the
     macOS CursorUIViewService system process.
+
+    On Windows we use ``tasklist`` to look for ``Cursor.exe``.
     """
+    system = platform.system()
+    if system == "Windows":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Cursor.exe", "/NH", "/FO", "CSV"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            return "Cursor.exe" in result.stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
     try:
         result = subprocess.run(
             ["ps", "-axo", "args"],
@@ -169,10 +207,11 @@ def find_or_create_workspace(project_path: str) -> Path:
     ws_dir = ws_storage / ws_id
     ws_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create workspace.json
-    folder_uri = "file://" + os.path.normpath(project_path)
+    # Create workspace.json with an RFC 8089 file:// URI matching Cursor's
+    # native format for the host OS.
+    folder_uri = _path_to_file_uri(project_path)
     ws_json = ws_dir / "workspace.json"
-    ws_json.write_text(json.dumps({"folder": folder_uri}))
+    ws_json.write_text(json.dumps({"folder": folder_uri}), encoding="utf-8")
 
     # Create an empty state.vscdb
     _init_workspace_db(ws_dir / "state.vscdb")
@@ -828,15 +867,16 @@ def _build_workspace_identifier(ws_dir: Path) -> dict:
 
     uri_obj: dict = {"$mid": 1}
     if folder_uri.startswith("file://"):
-        fs_path = folder_uri[len("file://"):].replace("%20", " ")
+        fs_path = paths._decode_file_uri(folder_uri) or ""
         uri_obj["fsPath"] = fs_path
         uri_obj["path"] = fs_path
         uri_obj["external"] = folder_uri
         uri_obj["scheme"] = "file"
     elif folder_uri.startswith("vscode-remote://"):
+        from urllib.parse import unquote as _unquote
         parts = folder_uri.split("/", 3)
         authority = parts[2] if len(parts) > 2 else ""
-        fs_path = "/" + parts[3] if len(parts) > 3 else "/"
+        fs_path = "/" + _unquote(parts[3]) if len(parts) > 3 else "/"
         uri_obj["fsPath"] = fs_path
         uri_obj["path"] = fs_path
         uri_obj["external"] = folder_uri

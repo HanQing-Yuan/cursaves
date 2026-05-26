@@ -115,7 +115,7 @@ cadfb263-3326-4aff-8887-dcc12f736b11     Feedback on documentation...   agent   
 
 ## Installation
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS or Linux, Git (for git backend). Zero required Python dependencies.
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), macOS / Linux / Windows, Git (for git backend). Zero required Python dependencies.
 
 **Tested with:** Cursor 2.6–3.0 (supports both old and new chat storage formats)
 
@@ -248,12 +248,23 @@ Data locations:
 
 - macOS: `~/Library/Application Support/Cursor/User/`
 - Linux: `~/.config/Cursor/User/`
+- Windows: `%APPDATA%\Cursor\User\` (typically `C:\Users\<you>\AppData\Roaming\Cursor\User\`)
 
 Notably, **chat data is always stored on the machine running Cursor's UI**, even when connected to a remote host via SSH. This is why switching machines means losing your conversation context.
 
 For more details, see [docs/how-cursor-stores-chats.md](docs/how-cursor-stores-chats.md).
 
 ## Cross-Platform Support
+
+### Windows notes
+
+cursaves runs on Windows for the common "Cursor UI on Windows, dev box on Linux via SSH" workflow. A few platform-specific points:
+
+- Cursor's data lives at `%APPDATA%\Cursor\User\` and cursaves picks it up automatically.
+- The "Cursor is running?" safety check uses `tasklist` and looks for `Cursor.exe`.
+- Automatic window reload via `osascript`/`xdotool` is not available on Windows -- after a `pull`/`import` you just need to fully **quit Cursor (right-click tray icon -> Quit, or end the Cursor.exe process) and reopen it**.
+- SSH remote workspace paths come from the remote host (e.g. `/data/foo`) and are kept POSIX-style internally; local workspace paths come from Windows (e.g. `D:\proj\foo`) and are normalised with backslashes.
+- The cursaves sync repo lives at `%USERPROFILE%\.cursaves\` and config at `%USERPROFILE%\.config\cursaves\` (so the layout matches macOS/Linux).
 
 ### Project identity
 

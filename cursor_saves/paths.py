@@ -8,25 +8,34 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote
 
 
 def get_cursor_user_dir() -> Path:
     """Return the Cursor User data directory for the current platform.
 
-    macOS:  ~/Library/Application Support/Cursor/User
-    Linux:  ~/.config/Cursor/User
+    macOS:    ~/Library/Application Support/Cursor/User
+    Linux:    ~/.config/Cursor/User
+    Windows:  %APPDATA%\\Cursor\\User
     """
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library" / "Application Support" / "Cursor" / "User"
     elif system == "Linux":
         base = Path.home() / ".config" / "Cursor" / "User"
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            # APPDATA should always be set on Windows, but fall back just in case.
+            appdata = str(Path.home() / "AppData" / "Roaming")
+        base = Path(appdata) / "Cursor" / "User"
     else:
         print(
             f"Error: Unsupported platform '{system}'.\n"
-            f"cursaves supports macOS and Linux.\n"
+            f"cursaves supports macOS, Linux, and Windows.\n"
             f"On macOS, Cursor data is at ~/Library/Application Support/Cursor/User/\n"
-            f"On Linux, Cursor data is at ~/.config/Cursor/User/",
+            f"On Linux, Cursor data is at ~/.config/Cursor/User/\n"
+            f"On Windows, Cursor data is at %APPDATA%\\Cursor\\User\\",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -71,6 +80,33 @@ def sanitize_project_path(project_path: str) -> str:
     return project_path.strip("/").replace("/", "-")
 
 
+def _decode_file_uri(uri: str) -> Optional[str]:
+    """Decode a ``file://`` URI to a filesystem path for the current platform.
+
+    Cursor writes URIs like:
+      - macOS / Linux:  ``file:///Users/foo/bar`` or ``file:///home/foo/bar``
+      - Windows:        ``file:///d%3A/foo/bar`` (drive letter %3A-encoded, forward slashes)
+
+    Returns ``None`` if the URI is not a ``file://`` URI.
+    """
+    if not uri.startswith("file://"):
+        return None
+    raw = uri[len("file://") :]
+    decoded = unquote(raw)
+    if platform.system() == "Windows":
+        # On Windows, RFC 8089 paths look like ``/<drive>:/...``. Strip the
+        # leading slash so we get a normal drive-letter path.
+        if re.match(r"^/[A-Za-z]:", decoded):
+            decoded = decoded[1:]
+        return os.path.normpath(decoded)
+    return decoded
+
+
+def _paths_equal(a: str, b: str) -> bool:
+    """Compare two filesystem paths, accounting for OS-specific case/separators."""
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
 def _decode_ssh_host(host: str) -> str:
     """Decode an SSH host identifier.
 
@@ -100,7 +136,7 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
         return []
 
     # Normalise the target path for comparison
-    target = os.path.normpath(os.path.expanduser(project_path))
+    target = os.path.expanduser(project_path)
 
     matches = []
     for ws_dir in ws_storage.iterdir():
@@ -110,25 +146,21 @@ def find_workspace_dirs_for_project(project_path: str) -> list[Path]:
         if not ws_json.exists():
             continue
         try:
-            data = json.loads(ws_json.read_text())
+            data = json.loads(ws_json.read_text(encoding="utf-8"))
             folder_uri = data.get("folder", "")
-            # Handle file:// URIs
+            folder_path: Optional[str] = None
             if folder_uri.startswith("file://"):
-                folder_path = folder_uri[len("file://") :]
-                # URL-decode common escapes
-                folder_path = folder_path.replace("%20", " ")
+                folder_path = _decode_file_uri(folder_uri)
             elif folder_uri.startswith("vscode-remote://"):
                 # SSH remote workspace - extract the path portion
                 # Format: vscode-remote://ssh-remote%2B<host>/<path>
                 parts = folder_uri.split("/", 3)
                 if len(parts) >= 4:
-                    folder_path = "/" + parts[3]
-                else:
-                    continue
-            else:
+                    folder_path = "/" + unquote(parts[3])
+            if not folder_path:
                 continue
 
-            if os.path.normpath(folder_path) == target:
+            if _paths_equal(folder_path, target):
                 matches.append(ws_dir)
         except (json.JSONDecodeError, OSError):
             continue
@@ -180,11 +212,11 @@ def list_all_workspaces() -> list[dict]:
         if not ws_json.exists():
             continue
         try:
-            data = json.loads(ws_json.read_text())
+            data = json.loads(ws_json.read_text(encoding="utf-8"))
 
             ws_type = "local"
             host = None
-            folder_path = ""
+            folder_path: Optional[str] = None
             folder_uri = ""
 
             # workspace .code-workspace: uses "workspace" key instead of "folder"
@@ -192,8 +224,7 @@ def list_all_workspaces() -> list[dict]:
                 ws_uri = data["workspace"]
                 if ws_uri.startswith("file://"):
                     folder_uri = ws_uri
-                    folder_path = ws_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = _decode_file_uri(ws_uri)
                     ws_type = "workspace"
                 else:
                     continue
@@ -203,8 +234,7 @@ def list_all_workspaces() -> list[dict]:
                     continue
 
                 if folder_uri.startswith("file://"):
-                    folder_path = folder_uri[len("file://") :]
-                    folder_path = folder_path.replace("%20", " ")
+                    folder_path = _decode_file_uri(folder_uri)
                 elif folder_uri.startswith("vscode-remote://"):
                     ws_type = "ssh"
                     # Format: vscode-remote://ssh-remote%2B<host>/<path>
@@ -218,11 +248,18 @@ def list_all_workspaces() -> list[dict]:
                         host = _decode_ssh_host(host)
                     parts = folder_uri.split("/", 3)
                     if len(parts) >= 4:
-                        folder_path = "/" + parts[3]
+                        # SSH paths are remote (typically POSIX); keep forward slashes.
+                        folder_path = "/" + unquote(parts[3])
                     else:
                         continue
                 else:
                     continue
+
+            if not folder_path:
+                continue
+
+            # SSH paths stay POSIX-style. Local paths get OS-native normalisation.
+            display_path = folder_path if ws_type == "ssh" else os.path.normpath(folder_path)
 
             # Get DB modification time
             db_path = ws_dir / "state.vscdb"
@@ -230,7 +267,7 @@ def list_all_workspaces() -> list[dict]:
 
             workspaces.append({
                 "folder_uri": folder_uri,
-                "path": os.path.normpath(folder_path),
+                "path": display_path,
                 "type": ws_type,
                 "host": host,
                 "workspace_dir": ws_dir,
@@ -411,9 +448,10 @@ def resolve_workspace(selector: str) -> Optional[dict]:
             if name == selector:
                 return ws
 
-    # Try as path substring
+    # Try as path substring (case-insensitive on Windows)
+    selector_key = os.path.normcase(selector)
     for ws in workspaces:
-        if selector in ws["path"]:
+        if selector_key in os.path.normcase(ws["path"]):
             return ws
 
     return None
@@ -474,6 +512,8 @@ def find_all_matching_workspaces(source_path: str) -> list[dict]:
     all_ws = list_all_workspaces()
     source_normalized = os.path.normpath(source_path)
     source_basename = os.path.basename(source_normalized)
+    source_key = os.path.normcase(source_normalized)
+    source_basename_key = os.path.normcase(source_basename)
 
     exact_matches = []
     basename_matches = []
@@ -482,9 +522,9 @@ def find_all_matching_workspaces(source_path: str) -> list[dict]:
         ws_path = ws["path"]
         ws_basename = os.path.basename(ws_path)
 
-        if ws_path == source_normalized:
+        if os.path.normcase(ws_path) == source_key:
             exact_matches.append(ws)
-        elif ws_basename == source_basename:
+        elif os.path.normcase(ws_basename) == source_basename_key:
             basename_matches.append(ws)
 
     # Return exact matches first, then basename matches

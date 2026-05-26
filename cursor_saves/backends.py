@@ -22,6 +22,21 @@ from typing import Optional
 _CONFIG_PATH = Path.home() / ".config" / "cursaves" / "config.json"
 
 
+def _git_identity_flags() -> list[str]:
+    """Return per-invocation git identity flags so commits work even if the
+    user has no global ``user.name`` / ``user.email`` configured.
+
+    The values are inlined into each ``git commit`` via ``-c key=value``;
+    no permanent git config is modified.
+    """
+    import socket
+    return [
+        "-c", "user.name=cursaves",
+        "-c", f"user.email=cursaves@{socket.gethostname()}",
+        "-c", "commit.gpgsign=false",
+    ]
+
+
 # ── Abstract base ────────────────────────────────────────────────────────
 
 
@@ -84,7 +99,7 @@ class GitBackend(SyncBackend):
         hostname = paths.get_machine_id()
         msg = f"[{hostname}] sync snapshots"
         subprocess.run(
-            ["git", "commit", "-m", msg],
+            ["git", *_git_identity_flags(), "commit", "-m", msg],
             cwd=str(self.sync_dir), capture_output=True,
         )
 
@@ -185,7 +200,7 @@ class GitBackend(SyncBackend):
             cwd=str(self.sync_dir), capture_output=True,
         )
         subprocess.run(
-            ["git", "commit", "-m", "Initialize cursaves sync repo"],
+            ["git", *_git_identity_flags(), "commit", "-m", "Initialize cursaves sync repo"],
             cwd=str(self.sync_dir), capture_output=True,
         )
 
